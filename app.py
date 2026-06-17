@@ -24,14 +24,14 @@ try:
 except ImportError:
     PILImage = None
 
-# ═══════════════════════════ WEB UI INITIALIZATION ════════════════════════════════════
+# ═══════════════════════════ INITIALIZATION & STATE GUARD ════════════════════════════════════
 if "is_running" not in st.session_state:
     st.session_state.is_running = False
 if "ui_logs" not in st.session_state:
     st.session_state.ui_logs = ["[System] Engine initialized. Awaiting execution command..."]
 
 def ui_print(text: str):
-    """Routes your Colab print statements to the Website Terminal"""
+    """Appends live processing data directly to the Streamlit UI memory array with timestamps."""
     print(text)
     timestamp = time.strftime('%H:%M:%S')
     st.session_state.ui_logs.append(f"[{timestamp}] {text}")
@@ -42,7 +42,7 @@ try:
     EMAIL_PASS = st.secrets["EMAIL_PASS"]
     NVAPI_KEY  = st.secrets["NVAPI_KEY"]
 except Exception:
-    st.error("🔒 Security Alert: Please define EMAIL_USER, EMAIL_PASS, and NVAPI_KEY inside Streamlit Secrets.")
+    st.error("🔒 Security Alert: Configuration parameters are absent. Please define EMAIL_USER, EMAIL_PASS, and NVAPI_KEY inside your Streamlit Secrets Management Tab.")
     st.stop()
 
 NVIDIA_API_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
@@ -61,10 +61,11 @@ SKIP_SENDER_PATTERNS = [
 _session = requests.Session()
 # ══════════════════════════════════════════════════════════════════════════════
 
-# (YOUR EXACT SAME FINGERPRINTS AND CORE LOGIC FUNCTIONS GO HERE)
+# ─────────────────────────── Romanized Fingerprints ──────────────────────────
 ROMANIZED_FINGERPRINTS = {
     "Telugu": ["unaaru", "unnaru", "unnaav", "ela unav", "chestunav", "chestunnav", "naku", "meeru", "emi chestunav", "chey", "cheppandi", "ledu", "undi", "avutundi", "chesanu", "vachanu", "veltanu", "chudandi", "manchi", "samacharam", "kadha", "kaadu", "aite", "aithe", "ante", "antey", "meeku", "mee ku", "ela unnav", "WB:naku", "WB:mee", "WB:oka", "WB:mari"],
     "Hindi": ["kya haal", "theek hoon", "namaste", "tumhara", "mujhe", "kaisa hai", "kaise ho", "bhai yaar", "batao", "dekho", "kyunki", "WB:kya", "WB:hai", "WB:hain", "WB:nahi", "WB:bhai", "WB:yaar", "WB:acha", "WB:theek", "WB:tum", "WB:hoon", "WB:aap", "WB:mere", "WB:mera", "WB:woh", "WB:hoga", "WB:phir"],
+    "Tamil": ["eppadi", "irukkeenga", "irukkinga", "vanakkam", "irukken", "theriyum", "theriyala", "sollanga", "mudiyuma", "paakalam", "ungaluku", "enakku", "WB:nalla", "WB:sollu", "WB:paar", "WB:thambi", "WB:akka", "WB:enna", "WB:romba", "WB:konjam", "WB:vaanga", "WB:ponga", "WB:seri"],
 }
 
 def _kw_score(text_lower: str, kw: str) -> int:
@@ -91,23 +92,44 @@ def _clean_language_string(raw: str) -> str:
     parts = [p.strip().title() for p in raw.split(',') if p.strip()]
     return ', '.join(parts)
 
-def _call_api(model: str, messages: list, max_tokens: int = 512, temperature: float = 0.0) -> str | None:
+def _call_api(model: str, messages: list, max_tokens: int = 512, temperature: float = 0.0) -> str:
+    """Robust API Caller with Automatic Fallback to prevent 'None' string errors."""
     headers = {"Authorization": f"Bearer {NVAPI_KEY}", "Content-Type": "application/json"}
+    
+    # Attempt 1: Target Model
     payload = {"model": model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
     try:
-        r = _session.post(NVIDIA_API_URL, headers=headers, json=payload, timeout=60)
+        r = _session.post(NVIDIA_API_URL, headers=headers, json=payload, timeout=30)
         if r.status_code == 200:
-            return r.json()["choices"][0]["message"]["content"].strip()
+            content = r.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+            if content: return content
     except Exception:
         pass
-    return None
+        
+    # Attempt 2: Instant Fallback to the Fast Model if Primary Times Out
+    payload["model"] = FAST_MODEL
+    try:
+        r = _session.post(NVIDIA_API_URL, headers=headers, json=payload, timeout=30)
+        if r.status_code == 200:
+            content = r.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+            if content: return content
+    except Exception:
+        pass
+        
+    return ""
 
 def detect_language_and_tone(text: str) -> tuple[str, str]:
     local_lang = local_romanized_detect(text)
-    system_prompt = "You are an expert linguist. Analyze the text and return EXACTLY two lines:\nLANGUAGE: <comma-separated language names>\nTONE: <Friendly or Formal>\n\nReturn ONLY the two lines."
+    system_prompt = (
+        "You are an expert linguist. Analyze the text and return EXACTLY two lines:\n"
+        "LANGUAGE: <comma-separated language names>\n"
+        "TONE: <Friendly or Formal>\n\n"
+        "Return ONLY the two lines. No extra text."
+    )
+    hint = f"\n[Local pre-scan detected: {local_lang}]" if local_lang else ""
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"Analyze:\n\n{text[:6000]}"},
+        {"role": "user", "content": f"Analyze:{hint}\n\n{text[:6000]}"},
     ]
     result = _call_api(FAST_MODEL, messages, max_tokens=60)
     language, tone = "English", "Formal"   
@@ -121,19 +143,26 @@ def detect_language_and_tone(text: str) -> tuple[str, str]:
     if local_lang and language.lower() == "english": language = _clean_language_string(local_lang)
     return language, tone
 
-def translate_to_english(text: str, detected_languages: str) -> str | None:
+def translate_to_english(text: str, detected_languages: str) -> str:
     if detected_languages.strip().lower() == "english": return text
     messages = [
-        {"role": "system", "content": "You are an elite translator. Translate ALL non-English content into fluent English. Output ONLY the translation."},
+        {"role": "system", "content": "You are an elite translator specializing in South Asian languages. Translate ALL non-English content into fluent, natural English. Output ONLY the English translation — no labels, no notes."},
         {"role": "user", "content": text[:12000]},
     ]
-    return _call_api(STRONG_MODEL, messages, max_tokens=1500)
+    res = _call_api(STRONG_MODEL, messages, max_tokens=1500)
+    return res if res else text
 
-def draft_english_reply(english_text: str, tone: str) -> str | None:
+def draft_english_reply(english_text: str, tone: str) -> str:
     persona_prompt = (
-        "You are Vishnu, a Computer Science & Engineering student at Amity University studying NLP, preparing for GATE. "
-        "Hobbies: Free Fire MAX, cricket (RCB, SRH, KKR), Telugu cinema. "
-        f"Match formatting rules to tone parameter: **{tone}**. Output ONLY the response payload."
+        "You are a real human writing a direct personal email response. You must act completely as the primary profile defined below:\n\n"
+        "YOUR PERSONAL DATA ENGINE:\n"
+        "- Name: Vishnu (Full name: Boddu Vishnu Vardhan Reddy)\n"
+        "- Occupation: Computer Science & Engineering student at Amity University\n"
+        "- Academic Focus: Python algorithms, complexity analysis, text scraping, and Natural Language Processing (NLP)\n"
+        "- Plan Parameters: Actively preparing for the GATE examination\n"
+        "- Hobbies: Major follower of T20 cricket and live IPL statistics (RCB, SRH, KKR), tracking regional Telugu cinema movie releases, and playing Free Fire MAX\n"
+        "- Daily Food Habits: Eats South Indian breakfast (Idli/Dosa/Poha) with coffee in the morning; Rice, dal, roti, and curries for lunch and dinner\n\n"
+        f"STYLISTIC ALIGNMENT: Match formatting rules to the calculated tone parameter: **{tone}**. Output ONLY the response text payload itself."
     )
     messages = [
         {"role": "system", "content": persona_prompt},
@@ -141,18 +170,19 @@ def draft_english_reply(english_text: str, tone: str) -> str | None:
     ]
     return _call_api(STRONG_MODEL, messages, max_tokens=600, temperature=0.5)
 
-def translate_to_native(english_reply: str, target_language: str, tone: str) -> str | None:
+def translate_to_native(english_reply: str, target_language: str, tone: str) -> str:
     if "english" in target_language.lower() and "," not in target_language: return english_reply
     messages = [
-        {"role": "system", "content": f"Translate the English reply into natural, idiomatic {target_language} matching a {tone} register. Output ONLY the translation."},
+        {"role": "system", "content": f"You are a native speaker of {target_language}. Translate the English reply into natural, idiomatic {target_language} matching a {tone} register. Output ONLY the final clean translation payload."},
         {"role": "user", "content": english_reply},
     ]
-    return _call_api(STRONG_MODEL, messages, max_tokens=1000)
+    res = _call_api(STRONG_MODEL, messages, max_tokens=1000)
+    return res if res else english_reply
 
 def run_qa_audit(english_draft: str, native_reply: str, target_tone: str, target_lang: str) -> tuple[int, str]:
     messages = [
-        {"role": "system", "content": f"Compare English draft with {target_lang} translation. Was **{target_tone}** tone preserved? Format as:\nSCORE: <1-5>\nANALYSIS: <one sentence>"},
-        {"role": "user", "content": f"Draft:\n{english_draft}\n\nTranslation:\n{native_reply}"},
+        {"role": "system", "content": f"You are a QA compliance bot checking translation chains. Compare the original English draft response with its translation into {target_lang}. The specified stylistic parameter target was **{target_tone}**. Format exactly as:\nSCORE: <integer 1-5>\nANALYSIS: <one sentence feedback string>"},
+        {"role": "user", "content": f"English draft:\n{english_draft}\n\nTranslated reply:\n{native_reply}"},
     ]
     result = _call_api(FAST_MODEL, messages, max_tokens=80)
     score, analysis = 5, "Audit verification completed successfully."
@@ -209,15 +239,19 @@ def should_skip_sender(sender_addr: str) -> bool:
     low = sender_addr.lower()
     return any(p in low for p in SKIP_SENDER_PATTERNS)
 
-# ═══════════════════════════ ENGINE EXECUTION ════════════════════════════════════
+# =====================================================================
+# FULL COLAB REPLICATED LIFECYCLE MANAGEMENT ENGINE
+# =====================================================================
 def process_email(msg, uid_str: str):
     sender_name, sender_addr = email.utils.parseaddr(msg.get("From", ""))
-    body, images = parse_email_body(msg)
-    full_text    = f"{body}".strip()
-    
-    if not full_text or should_skip_sender(sender_addr): return
 
-    ui_print("⚠️ Target entity detected inside queue. Instantiating orchestration pipelines...")
+    body, images = parse_email_body(msg)
+    ocr          = extract_ocr(images) if images else ""
+    full_text    = f"{body}\n{ocr}".strip()
+    
+    if not full_text or should_skip_sender(sender_addr):
+        return
+
     ui_print("==========================================")
     ui_print(f"📧 EMAIL CONTENT INGESTED (UID {uid_str})")
     ui_print("==========================================")
@@ -234,11 +268,19 @@ def process_email(msg, uid_str: str):
     ui_print("Generating English Translation...")
     english_text = translate_to_english(full_text, language)
     ui_print(f"👉 English Translation: \"{english_text}\" ({time.time()-t0:.2f}s)")
+    ui_print("-----------------------")
 
     t0 = time.time()
     ui_print("🤖 AI Drafting Persona-Based Support Reply (in English)...")
     english_reply = draft_english_reply(english_text, tone)
+    
+    # SAFETY GUARD: Abort cleanly if AI generates a blank string
+    if not english_reply:
+        ui_print("🛑 Error: AI drafting engine failed to return a valid response. Exiting trace.")
+        return
+        
     ui_print(f"👉 Generated English Draft: \"{english_reply}\" ({time.time()-t0:.2f}s)")
+    ui_print("-----------------------")
 
     t0 = time.time()
     ui_print(f"🔄 Translating response framework → {language} & initializing QA audit matrices...")
@@ -248,11 +290,16 @@ def process_email(msg, uid_str: str):
         native_reply = f_trans.result()
         qa_score, qa_analysis = f_qa.result()
 
+    if not native_reply:
+        ui_print("🛑 Native dialect mapping process aborted due to connection timeout.")
+        return
+        
     ui_print(f"👉 Final Customer-Facing Response: \"{native_reply}\"")
     ui_print(f"👉 QA Tone Evaluation Compliance Audit Output: Score {qa_score}/5 — {qa_analysis} ({time.time()-t0:.2f}s)")
+    ui_print("-----------------------")
 
     if qa_score < 3:
-        improved = translate_to_native(english_reply, language, tone + " (Enforce strict politeness)")
+        improved = translate_to_native(english_reply, language, tone + " (Enforce strict politeness constraints)")
         if improved: native_reply = improved
 
     raw_subj, enc = decode_header(msg.get("Subject", "No Subject"))[0]
@@ -260,7 +307,7 @@ def process_email(msg, uid_str: str):
     reply_subj = raw_subj if raw_subj.lower().startswith("re:") else f"Re: {raw_subj}"
     send_reply(sender_addr, reply_subj, native_reply)
 
-# ═══════════════════════════ WEBSITE UI LAYOUT ════════════════════════════════════
+# ═══════════════════════════ STREAMLIT INTERFACE FRAMEWORK ════════════════════════════════════
 st.set_page_config(layout="wide")
 st.title("📬 Intelligent Multilingual Support Middleware Engine")
 st.markdown("---")
@@ -275,6 +322,7 @@ with col_left:
         if st.button("🚀 Launch Background Engine", type="primary", use_container_width=True):
             st.session_state.is_running = True
             ui_print("🚀 Autonomous Background Engine Framework Activated")
+            ui_print(f"Tracking target entry data arrays on ports every {POLL_INTERVAL_SECONDS}s")
             st.rerun()
     else:
         if st.button("🛑 Terminate Background Engine", type="secondary", use_container_width=True):
@@ -289,13 +337,15 @@ with col_left:
 
 with col_right:
     st.header("🖥️ Live Telemetry Streams")
+    
     if st.button("🗑️ Clear Log Console History", use_container_width=True):
         st.session_state.ui_logs = ["[System] Buffer memory purged. Awaiting execution command..."]
         st.rerun()
 
-    # The exact terminal look from Colab
-    st.code("\n".join(st.session_state.ui_logs), language="plaintext")
+    log_content = "\n".join(st.session_state.ui_logs)
+    st.code(log_content, language="plaintext")
 
+# ═══════════════════════════ RUNTIME ENGINE WORKER CORE ════════════════════════════════════
 if st.session_state.is_running:
     processed_ids = load_processed_ids()
     mail = None
@@ -308,7 +358,9 @@ if st.session_state.is_running:
         if status == "OK" and data[0]:
             unread_uids = data[0].split()
             new_uids    = [u for u in unread_uids if u.decode() not in processed_ids]
+            
             if new_uids:
+                ui_print("⚠️ Target entity detected inside queue. Instantiating orchestration pipelines...")
                 for uid_bytes in new_uids:
                     uid_str = uid_bytes.decode()
                     _, msg_data = mail.uid("fetch", uid_bytes, "(RFC822)")
@@ -322,5 +374,9 @@ if st.session_state.is_running:
         mail.logout()
     except Exception as e:
         ui_print(f"❌ Connection error: {e}")
+        if mail:
+            try: mail.logout()
+            except: pass
+
     time.sleep(POLL_INTERVAL_SECONDS)
     st.rerun()
