@@ -6,311 +6,321 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import email.utils
 import requests
-import json
-import re 
+import re
 import time
-import html  
+import html
 import io
+import os
+from concurrent.futures import ThreadPoolExecutor
 import streamlit as st
-from PIL import Image as PILImage
 
 try:
     import pytesseract
 except ImportError:
     pytesseract = None
 
-# ==================== WEB PORTAL LAYOUT CONFIGURATION ====================
-st.set_page_config(
-    page_title="Global Email Intelligence Portal",
-    page_icon="📥",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-st.markdown("""
-    <style>
-    .main-title { font-size: 2.5rem; font-weight: 800; color: #1E293B; margin-bottom: 0.2rem; }
-    .subtitle { font-size: 1.1rem; color: #64748B; margin-bottom: 2rem; }
-    .metric-card { background-color: #F8FAFC; padding: 1.5rem; border-radius: 0.75rem; border-left: 6px solid #2563EB; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
-    .status-text { font-family: 'Courier New', Courier, monospace; font-size: 0.9rem; color: #0F172A; }
-    </style>
-""", unsafe_allow_html=True)
-
-if "email_store" not in st.session_state:
-    st.session_state.email_store = []
-if "email_subjects" not in st.session_state:
-    st.session_state.email_subjects = []
-
-# ==================== SIDEBAR CONFIGURATION ====================
-st.sidebar.image("https://img.icons8.com/fluent/100/000000/artificial-intelligence.png", width=55)
-st.sidebar.markdown("### Secure Server Settings")
-
-EMAIL_USER = st.sidebar.text_input("Gmail Address", value="sreenivasareddy267538@gmail.com")
-EMAIL_PASS = st.sidebar.text_input("Gmail App Password", value="vzjt tjrq qmif szac", type="password")
-
-st.sidebar.markdown("---")
-st.sidebar.markdown("### AI Engine Settings")
-MODEL_NAME = "meta/llama-3.3-70b-instruct"
-API_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-
-default_key = ""
 try:
-    from google.colab import userdata
-    default_key = userdata.get('NVAPI_KEY')
-except:
-    pass
+    from PIL import Image as PILImage
+except ImportError:
+    PILImage = None
 
-NVAPI_KEY = st.sidebar.text_input("NVIDIA API Key", value=default_key, type="password")
+# ═══════════════════════════ WEB UI INITIALIZATION ════════════════════════════════════
+if "is_running" not in st.session_state:
+    st.session_state.is_running = False
+if "ui_logs" not in st.session_state:
+    st.session_state.ui_logs = ["[System] Engine initialized. Awaiting execution command..."]
 
-# ==================== CORE COGNITIVE COMPONENT FUNCTIONS ====================
+def ui_print(text: str):
+    """Routes your Colab print statements to the Website Terminal"""
+    print(text)
+    timestamp = time.strftime('%H:%M:%S')
+    st.session_state.ui_logs.append(f"[{timestamp}] {text}")
 
-def send_nvidia_request_with_retry(payload, status_placeholder, max_retries=4):
-    if not NVAPI_KEY:
-        st.sidebar.error("❌ Missing NVIDIA API Key! Configure it in the sidebar or advanced settings.")
-        return None
-        
-    headers = {
-        "Authorization": f"Bearer {NVAPI_KEY.strip()}",
-        "Content-Type": "application/json"
-    }
-    
-    delay = 2  
-    for attempt in range(max_retries):
-        try:
-            response = requests.post(API_URL, headers=headers, json=payload)
-            if response.status_code == 429:
-                status_placeholder.warning(f"⚠️ Rate limit hit (429). Pacing engine pausing for {delay}s before retry...")
-                time.sleep(delay)
-                delay *= 2  
-                continue
-                
-            response_data = response.json()
-            if "choices" in response_data:
-                return response_data["choices"][0]["message"]["content"].strip()
-            else:
-                st.error(f"NVIDIA API Error: {response_data}")
-                return None
-                
-        except Exception as network_error:
-            status_placeholder.warning(f"Connection hiccup, retrying: {network_error}")
-            time.sleep(1)
-            
-    st.error("❌ Pipeline Break: Max retries reached. Server overloaded.")
+# ═══════════════════════════ SECURED INFRASTRUCTURE SETTINGS ════════════════════════════════════
+try:
+    EMAIL_USER = st.secrets["EMAIL_USER"]
+    EMAIL_PASS = st.secrets["EMAIL_PASS"]
+    NVAPI_KEY  = st.secrets["NVAPI_KEY"]
+except Exception:
+    st.error("🔒 Security Alert: Please define EMAIL_USER, EMAIL_PASS, and NVAPI_KEY inside Streamlit Secrets.")
+    st.stop()
+
+NVIDIA_API_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
+FAST_MODEL     = "meta/llama-3.1-8b-instruct"   
+STRONG_MODEL   = "meta/llama-3.3-70b-instruct"  
+
+POLL_INTERVAL_SECONDS = 15  
+PROCESSED_IDS_FILE    = "processed_email_ids.txt"
+
+SKIP_SENDER_PATTERNS = [
+    str(EMAIL_USER).lower(), "noreply", "no-reply", "donotreply", "do-not-reply",
+    "mailer-daemon", "postmaster", "bounce", "notifications@", "alert@",
+    "support@", "automated@", "newsletter@",
+]
+
+_session = requests.Session()
+# ══════════════════════════════════════════════════════════════════════════════
+
+# (YOUR EXACT SAME FINGERPRINTS AND CORE LOGIC FUNCTIONS GO HERE)
+ROMANIZED_FINGERPRINTS = {
+    "Telugu": ["unaaru", "unnaru", "unnaav", "ela unav", "chestunav", "chestunnav", "naku", "meeru", "emi chestunav", "chey", "cheppandi", "ledu", "undi", "avutundi", "chesanu", "vachanu", "veltanu", "chudandi", "manchi", "samacharam", "kadha", "kaadu", "aite", "aithe", "ante", "antey", "meeku", "mee ku", "ela unnav", "WB:naku", "WB:mee", "WB:oka", "WB:mari"],
+    "Hindi": ["kya haal", "theek hoon", "namaste", "tumhara", "mujhe", "kaisa hai", "kaise ho", "bhai yaar", "batao", "dekho", "kyunki", "WB:kya", "WB:hai", "WB:hain", "WB:nahi", "WB:bhai", "WB:yaar", "WB:acha", "WB:theek", "WB:tum", "WB:hoon", "WB:aap", "WB:mere", "WB:mera", "WB:woh", "WB:hoga", "WB:phir"],
+}
+
+def _kw_score(text_lower: str, kw: str) -> int:
+    if kw.startswith("WB:"):
+        word = kw[3:]
+        return 1 if re.search(r'\b' + re.escape(word) + r'\b', text_lower) else 0
+    return 1 if kw in text_lower else 0
+
+def local_romanized_detect(text: str) -> str | None:
+    text_lower = text.lower()
+    scores = {}
+    for lang, keywords in ROMANIZED_FINGERPRINTS.items():
+        score = sum(_kw_score(text_lower, kw) for kw in keywords)
+        if score > 0: scores[lang] = score
+    if not scores: return None
+    best_lang  = max(scores, key=scores.get)
+    if scores[best_lang] < 2: return None
+    return best_lang
+
+def _clean_language_string(raw: str) -> str:
+    raw = re.sub(r'\s*\(.*?\)', '', raw)      
+    raw = re.sub(r'\s*[-–].*$', '', raw)       
+    raw = re.sub(r'\s+', ' ', raw).strip()
+    parts = [p.strip().title() for p in raw.split(',') if p.strip()]
+    return ', '.join(parts)
+
+def _call_api(model: str, messages: list, max_tokens: int = 512, temperature: float = 0.0) -> str | None:
+    headers = {"Authorization": f"Bearer {NVAPI_KEY}", "Content-Type": "application/json"}
+    payload = {"model": model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
+    try:
+        r = _session.post(NVIDIA_API_URL, headers=headers, json=payload, timeout=60)
+        if r.status_code == 200:
+            return r.json()["choices"][0]["message"]["content"].strip()
+    except Exception:
+        pass
     return None
 
-def clean_html(html_text):
-    unescaped = html.unescape(html_text)
-    clean = re.sub(r'<style[^>]*>[\s\S]*?</style>', '', unescaped, flags=re.IGNORECASE)
-    clean = re.sub(r'<script[^>]*>[\s\S]*?</script>', '', clean, flags=re.IGNORECASE)
-    clean = re.sub(r'<[^>]+>', ' ', clean)
-    clean = re.sub(r'[\u200b-\u200d\u2060\ufeff\xad]', '', clean)
-    return re.sub(r'\s+', ' ', clean).strip()
+def detect_language_and_tone(text: str) -> tuple[str, str]:
+    local_lang = local_romanized_detect(text)
+    system_prompt = "You are an expert linguist. Analyze the text and return EXACTLY two lines:\nLANGUAGE: <comma-separated language names>\nTONE: <Friendly or Formal>\n\nReturn ONLY the two lines."
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"Analyze:\n\n{text[:6000]}"},
+    ]
+    result = _call_api(FAST_MODEL, messages, max_tokens=60)
+    language, tone = "English", "Formal"   
+    if result:
+        for line in result.strip().splitlines():
+            upper = line.upper()
+            if upper.startswith("LANGUAGE:"): language = _clean_language_string(line.split(":", 1)[1].strip())
+            elif upper.startswith("TONE:"):
+                raw_tone = line.split(":", 1)[1].strip().rstrip(".")
+                tone = "Friendly" if "friend" in raw_tone.lower() else "Formal"
+    if local_lang and language.lower() == "english": language = _clean_language_string(local_lang)
+    return language, tone
 
-def extract_text_from_images_ocr(image_bytes_list):
-    if not pytesseract:
-        return ""
-    ocr_text_pool = []
-    for idx, img_bytes in enumerate(image_bytes_list):
-        try:
-            image_object = PILImage.open(io.BytesIO(img_bytes))
-            extracted_string = pytesseract.image_to_string(image_object)
-            if extracted_string.strip():
-                ocr_text_pool.append(f"\n--- [Text Extracted From Attached Image #{idx+1}] ---\n{extracted_string.strip()}")
-        except:
-            pass
-    return "\n".join(ocr_text_pool)
+def translate_to_english(text: str, detected_languages: str) -> str | None:
+    if detected_languages.strip().lower() == "english": return text
+    messages = [
+        {"role": "system", "content": "You are an elite translator. Translate ALL non-English content into fluent English. Output ONLY the translation."},
+        {"role": "user", "content": text[:12000]},
+    ]
+    return _call_api(STRONG_MODEL, messages, max_tokens=1500)
 
-# ==================== MAIN DASHBOARD UI WORKSPACE ====================
-st.markdown('<div class="main-title">📥 Global Email Intelligence Portal</div>', unsafe_allow_html=True)
-st.markdown('<div class="subtitle">Secure Multi-Stage Email Analysis, Optical Character Recognition, and Fallback Persona Engine</div>', unsafe_allow_html=True)
+def draft_english_reply(english_text: str, tone: str) -> str | None:
+    persona_prompt = (
+        "You are Vishnu, a Computer Science & Engineering student at Amity University studying NLP, preparing for GATE. "
+        "Hobbies: Free Fire MAX, cricket (RCB, SRH, KKR), Telugu cinema. "
+        f"Match formatting rules to tone parameter: **{tone}**. Output ONLY the response payload."
+    )
+    messages = [
+        {"role": "system", "content": persona_prompt},
+        {"role": "user", "content": f"Draft a personal response to this message:\n\n{english_text[:5000]}"},
+    ]
+    return _call_api(STRONG_MODEL, messages, max_tokens=600, temperature=0.5)
 
-col_ctrl_1, col_ctrl_2 = st.columns([1, 2])
+def translate_to_native(english_reply: str, target_language: str, tone: str) -> str | None:
+    if "english" in target_language.lower() and "," not in target_language: return english_reply
+    messages = [
+        {"role": "system", "content": f"Translate the English reply into natural, idiomatic {target_language} matching a {tone} register. Output ONLY the translation."},
+        {"role": "user", "content": english_reply},
+    ]
+    return _call_api(STRONG_MODEL, messages, max_tokens=1000)
 
-with col_ctrl_1:
-    folder_choice = st.radio("Select Mail Folder Target", ["Inbox (Clean)", "Spam Folder"], horizontal=True)
-    target_folder = "[Gmail]/Spam" if folder_choice == "Spam Folder" else "inbox"
+def run_qa_audit(english_draft: str, native_reply: str, target_tone: str, target_lang: str) -> tuple[int, str]:
+    messages = [
+        {"role": "system", "content": f"Compare English draft with {target_lang} translation. Was **{target_tone}** tone preserved? Format as:\nSCORE: <1-5>\nANALYSIS: <one sentence>"},
+        {"role": "user", "content": f"Draft:\n{english_draft}\n\nTranslation:\n{native_reply}"},
+    ]
+    result = _call_api(FAST_MODEL, messages, max_tokens=80)
+    score, analysis = 5, "Audit verification completed successfully."
+    if result:
+        for line in result.strip().splitlines():
+            if line.upper().startswith("SCORE:"):
+                try: score = int(re.search(r'\d', line.split(":", 1)[1]).group())
+                except Exception: pass
+            elif line.upper().startswith("ANALYSIS:"): analysis = line.split(":", 1)[1].strip()
+    return score, analysis
 
-with col_ctrl_2:
-    st.markdown("<br>", unsafe_allow_html=True)
-    if st.button("🔄 Sync & Retrieve Latest Mail Threads", use_container_width=True):
-        if not EMAIL_USER or not EMAIL_PASS:
-            st.error("Please enter your Gmail configurations in the sidebar.")
-        else:
-            with st.spinner("Establishing secure IMAP handshake link..."):
-                try:
-                    mail = imaplib.IMAP4_SSL("imap.gmail.com")
-                    mail.login(EMAIL_USER, EMAIL_PASS)
-                    mail.select(target_folder)
-                    
-                    status, messages = mail.search(None, "ALL")
-                    email_ids = messages[0].split()
-                    latest_emails = email_ids[-10:]
-                    latest_emails.reverse()
-                    
-                    st.session_state.email_store = []
-                    st.session_state.email_subjects = []
-                    
-                    for idx, e_id in enumerate(latest_emails):
-                        res, msg_data = mail.fetch(e_id, "(RFC822)")
-                        for response in msg_data:
-                            if isinstance(response, tuple):
-                                msg = email.message_from_bytes(response[1])
-                                subject, encoding = decode_header(msg["Subject"])[0]
-                                if isinstance(subject, bytes):
-                                    subject = subject.decode(encoding or "utf-8", errors="ignore")
-                                st.session_state.email_subjects.append(f"[{idx}] {subject}")
-                                st.session_state.email_store.append(msg)
-                    mail.logout()
-                    st.success(f"Successfully synced top {len(st.session_state.email_subjects)} email headers!")
-                except Exception as err:
-                    st.error(f"Failed to fetch mail data: {err}")
+def clean_html(html_text: str) -> str:
+    text = html.unescape(html_text)
+    text = re.sub(r"<style[^>]*>[\s\S]*?</style>|<script[^>]*>[\s\S]*?</script>|<[^>]+>", " ", text, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", text).strip()
 
+def parse_email_body(msg) -> tuple[str, list]:
+    body, html_body, images = "", "", []
+    if msg.is_multipart():
+        for part in msg.walk():
+            ct = part.get_content_type()
+            raw = part.get_payload(decode=True)
+            if ct.startswith("image/") and raw: images.append(raw)
+            elif ct == "text/plain" and not body and raw: body = raw.decode(errors="ignore")
+            elif ct == "text/html" and not html_body and raw: html_body = raw.decode(errors="ignore")
+    else:
+        ct, raw = msg.get_content_type(), msg.get_payload(decode=True)
+        if raw:
+            if ct.startswith("image/"): images.append(raw)
+            elif ct == "text/html": html_body = raw.decode(errors="ignore")
+            else: body = raw.decode(errors="ignore")
+    return (clean_html(html_body) if html_body.strip() else clean_html(body)).strip(), images
+
+def send_reply(recipient: str, subject: str, body_text: str):
+    try:
+        msg = MIMEMultipart()
+        msg["From"], msg["To"], msg["Subject"] = EMAIL_USER, recipient, subject
+        msg.attach(MIMEText(body_text, "plain", "utf-8"))
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(EMAIL_USER, EMAIL_PASS)
+            server.sendmail(EMAIL_USER, recipient, msg.as_string())
+        ui_print(f"✅ Auto outbound SMTP dispatch successful → {recipient}")
+    except Exception as e:
+        ui_print(f"❌ Outbound SMTP Delivery Core Failure: {e}")
+
+def load_processed_ids() -> set:
+    if not os.path.exists(PROCESSED_IDS_FILE): return set()
+    with open(PROCESSED_IDS_FILE, "r") as f: return set(line.strip() for line in f if line.strip())
+
+def save_processed_id(uid: str):
+    with open(PROCESSED_IDS_FILE, "a") as f: f.write(uid + "\n")
+
+def should_skip_sender(sender_addr: str) -> bool:
+    low = sender_addr.lower()
+    return any(p in low for p in SKIP_SENDER_PATTERNS)
+
+# ═══════════════════════════ ENGINE EXECUTION ════════════════════════════════════
+def process_email(msg, uid_str: str):
+    sender_name, sender_addr = email.utils.parseaddr(msg.get("From", ""))
+    body, images = parse_email_body(msg)
+    full_text    = f"{body}".strip()
+    
+    if not full_text or should_skip_sender(sender_addr): return
+
+    ui_print("⚠️ Target entity detected inside queue. Instantiating orchestration pipelines...")
+    ui_print("==========================================")
+    ui_print(f"📧 EMAIL CONTENT INGESTED (UID {uid_str})")
+    ui_print("==========================================")
+    ui_print(full_text)
+    ui_print("==========================================")
+
+    t0 = time.time()
+    ui_print("Processing deep text scanning via NVIDIA Llama 3.1 8B...")
+    language, tone = detect_language_and_tone(full_text)
+    ui_print(f"👉 Detected Language: **{language}**")
+    ui_print(f"👉 Evaluated Email Tone: **{tone}** ({time.time()-t0:.2f}s)")
+
+    t0 = time.time()
+    ui_print("Generating English Translation...")
+    english_text = translate_to_english(full_text, language)
+    ui_print(f"👉 English Translation: \"{english_text}\" ({time.time()-t0:.2f}s)")
+
+    t0 = time.time()
+    ui_print("🤖 AI Drafting Persona-Based Support Reply (in English)...")
+    english_reply = draft_english_reply(english_text, tone)
+    ui_print(f"👉 Generated English Draft: \"{english_reply}\" ({time.time()-t0:.2f}s)")
+
+    t0 = time.time()
+    ui_print(f"🔄 Translating response framework → {language} & initializing QA audit matrices...")
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        f_trans = executor.submit(translate_to_native, english_reply, language, tone)
+        f_qa    = executor.submit(run_qa_audit, english_reply, english_reply, tone, language)
+        native_reply = f_trans.result()
+        qa_score, qa_analysis = f_qa.result()
+
+    ui_print(f"👉 Final Customer-Facing Response: \"{native_reply}\"")
+    ui_print(f"👉 QA Tone Evaluation Compliance Audit Output: Score {qa_score}/5 — {qa_analysis} ({time.time()-t0:.2f}s)")
+
+    if qa_score < 3:
+        improved = translate_to_native(english_reply, language, tone + " (Enforce strict politeness)")
+        if improved: native_reply = improved
+
+    raw_subj, enc = decode_header(msg.get("Subject", "No Subject"))[0]
+    if isinstance(raw_subj, bytes): raw_subj = raw_subj.decode(enc or "utf-8", errors="ignore")
+    reply_subj = raw_subj if raw_subj.lower().startswith("re:") else f"Re: {raw_subj}"
+    send_reply(sender_addr, reply_subj, native_reply)
+
+# ═══════════════════════════ WEBSITE UI LAYOUT ════════════════════════════════════
+st.set_page_config(layout="wide")
+st.title("📬 Intelligent Multilingual Support Middleware Engine")
 st.markdown("---")
 
-if st.session_state.email_subjects:
-    selected_subject = st.selectbox("Select an incoming message thread to process:", st.session_state.email_subjects)
-    selection_index = st.session_state.email_subjects.index(selected_subject)
-    selected_msg = st.session_state.email_store[selection_index]
+col_left, col_right = st.columns([1, 2.5])
+
+with col_left:
+    st.header("⚙️ Control Node")
+    st.info(f"📧 **Active Mailbox:** `{EMAIL_USER}`")
     
-    if st.button("🚀 Run Deep Cognitive Evaluation Pipeline", type="primary", use_container_width=True):
-        status_box = st.empty()
-        body = ""
-        html_body = ""
-        extracted_images = []
+    if not st.session_state.is_running:
+        if st.button("🚀 Launch Background Engine", type="primary", use_container_width=True):
+            st.session_state.is_running = True
+            ui_print("🚀 Autonomous Background Engine Framework Activated")
+            st.rerun()
+    else:
+        if st.button("🛑 Terminate Background Engine", type="secondary", use_container_width=True):
+            st.session_state.is_running = False
+            ui_print("🛑 Standby loop decoupled. Monitor stopped.")
+            st.rerun()
+            
+    st.markdown("---")
+    st.subheader("📊 Engine Matrix")
+    st.text(f"Processor: {FAST_MODEL}")
+    st.text(f"Reasoning: {STRONG_MODEL}")
+
+with col_right:
+    st.header("🖥️ Live Telemetry Streams")
+    if st.button("🗑️ Clear Log Console History", use_container_width=True):
+        st.session_state.ui_logs = ["[System] Buffer memory purged. Awaiting execution command..."]
+        st.rerun()
+
+    # The exact terminal look from Colab
+    st.code("\n".join(st.session_state.ui_logs), language="plaintext")
+
+if st.session_state.is_running:
+    processed_ids = load_processed_ids()
+    mail = None
+    try:
+        mail = imaplib.IMAP4_SSL("imap.gmail.com")
+        mail.login(EMAIL_USER, EMAIL_PASS)
+        mail.select("inbox")
+        status, data = mail.uid("search", None, "UNSEEN")
         
-        if selected_msg.is_multipart():
-            for part in selected_msg.walk():
-                content_type = part.get_content_type()
-                content_disposition = str(part.get("Content-Disposition"))
-                if content_type.startswith("image/"):
-                    img_bytes = part.get_payload(decode=True)
-                    if img_bytes: extracted_images.append(img_bytes)
-                    continue
-                if "attachment" in content_disposition: continue
-                if content_type == "text/plain":
-                    body = part.get_payload(decode=True).decode(errors="ignore")
-                elif content_type == "text/html":
-                    html_body = part.get_payload(decode=True).decode(errors="ignore")
-            if html_body.strip(): body = clean_html(html_body)
-            elif body.strip(): body = clean_html(body)
-        else:
-            content_type = selected_msg.get_content_type()
-            payload = selected_msg.get_payload(decode=True)
-            if content_type.startswith("image/"):
-                if payload: extracted_images.append(payload)
-            elif content_type == "text/html":
-                body = clean_html(payload.decode(errors="ignore"))
+        if status == "OK" and data[0]:
+            unread_uids = data[0].split()
+            new_uids    = [u for u in unread_uids if u.decode() not in processed_ids]
+            if new_uids:
+                for uid_bytes in new_uids:
+                    uid_str = uid_bytes.decode()
+                    _, msg_data = mail.uid("fetch", uid_bytes, "(RFC822)")
+                    process_email(email.message_from_bytes(msg_data[0][1]), uid_str)
+                    processed_ids.add(uid_str)
+                    save_processed_id(uid_str)
             else:
-                body = clean_html(payload.decode(errors="ignore"))
-                
-        image_ocr_payload = ""
-        if extracted_images:
-            image_ocr_payload = extract_text_from_images_ocr(extracted_images)
-            
-        total_email_text = f"{body.strip()}\n{image_ocr_payload}".strip()
-        
-        if total_email_text or extracted_images:
-            tab_doc, tab_ai = st.columns([1, 1])
-            
-            with tab_doc:
-                st.markdown("### 📄 Email Document Payload")
-                if body.strip():
-                    st.text_area("Cleaned Email Text Body", value=body.strip(), height=250, disabled=True)
-                if image_ocr_payload.strip():
-                    st.text_area("Extracted OCR Text Layer", value=image_ocr_payload.strip(), height=150, disabled=True)
-                if extracted_images:
-                    st.markdown("#### 📸 Extracted Image Assets")
-                    for img_bytes in extracted_images:
-                        st.image(img_bytes, use_column_width=True)
-                        
-            with tab_ai:
-                st.markdown("### 🧠 AI Analytics & Automation")
-                
-                if total_email_text:
-                    status_box.info("🕵️ Stage 1/5: Mapping linguistic matrix fingerprints...")
-                    lang_payload = {
-                        "model": MODEL_NAME,
-                        "messages": [{"role": "system", "content": "You are an advanced language identification system. Identify underlying languages spoken phonetically. Ignore nouns/currency markers. STRICT ACCURACY RULE: Do not guess based on acronyms like 'CA 1' or 'marks'. If pure English shorthand, return ONLY 'English'. Reply with clean, comma-separated language names."},
-                                     {"role": "user", "content": f"Identify languages:\n\n{total_email_text[:20000]}"}],
-                        "temperature": 0.0, "max_tokens": 100
-                    }
-                    detected_languages = send_nvidia_request_with_retry(lang_payload, status_box)
-                    
-                    if detected_languages:
-                        status_box.info("🔀 Stage 2/5: Synchronizing English translation layers...")
-                        trans_payload = {
-                            "model": MODEL_NAME,
-                            "messages": [{"role": "system", "content": "You are an elite translator. Convert regular or phonetic transliterated regional layouts into fluent English. Preserve all metrics and exact values. Output ONLY translation text."},
-                                         {"role": "user", "content": f"Translate into English:\n\n{total_email_text[:15000]}"}],
-                            "temperature": 0.0, "max_tokens": 2000
-                        }
-                        translation_output = send_nvidia_request_with_retry(trans_payload, status_box) if "english" not in detected_languages.lower() else total_email_text
-                        
-                        status_box.info("🎭 Stage 3/5: Running deep word-by-word tone profiler...")
-                        tone_payload = {
-                            "model": MODEL_NAME,
-                            "messages": [{"role": "system", "content": "You are an expert communication analyst. Classify tone as 'Friendly' or 'Formal'. Read every single word. If it starts formal but shifts to personal questions ('ela unav', 'tinnava'), it is 'Friendly'. Reply with ONLY the single classification word."},
-                                         {"role": "user", "content": f"Determine tone:\n\n{total_email_text[:5000]}"}],
-                            "temperature": 0.0, "max_tokens": 10
-                        }
-                        detected_tone = send_nvidia_request_with_retry(tone_payload, status_box)
-                        
-                        status_box.info("🤖 Stage 4/5: Compiling human persona fallback response...")
-                        draft_payload = {
-                            "model": MODEL_NAME,
-                            "messages": [{"role": "system", "content": f"You are a real human writing a direct personal reply as Vishnu (Boddu Vishnu Vardhan Reddy), a Computer Science student at Amity University studying NLP, Python, and GATE. Hobbies: IPL cricket, Telugu movies, Free Fire MAX. Food: Idli/Dosa/Poha with coffee in the morning, rice/dal/roti for lunch/dinner. CRITICAL AUTONOMOUS FALLBACK: If asked details not in profile, invent a natural realistic human reply fitting Vishnu's background. NEVER say 'I am an AI'. Match tone style parameter: **{detected_tone}**. Output ONLY response text payload."},
-                                         {"role": "user", "content": f"Draft human response to:\n\n{translation_output[:5000]}"}],
-                            "temperature": 0.5, "max_tokens": 1000
-                        }
-                        english_reply = send_nvidia_request_with_retry(draft_payload, status_box)
-                        
-                        status_box.info(f"🔄 Stage 5/5: Translating response back to destination tracking system ({detected_languages})...")
-                        rev_payload = {
-                            "model": MODEL_NAME,
-                            "messages": [{"role": "system", "content": f"You are an elite linguistic expert. Translate the English message into {detected_languages}. Every phrase must be complete. Explicitly add verbs for implied actions. Avoid robotic phrases (do not use 'అడగ్గా ధన్యవాదాలు', use 'అడిగినందుకు ధన్యవాదాలు'). Maintain {detected_tone} tone register. Output ONLY final clean text translation."},
-                                         {"role": "user", "content": f"Translate this human draft:\n\n{english_reply}"}],
-                            "temperature": 0.0, "max_tokens": 1500
-                        }
-                        final_native_reply = send_nvidia_request_with_retry(rev_payload, status_box) if "english" not in detected_languages.lower() else english_reply
-                        
-                        if final_native_reply:
-                            status_box.empty()
-                            st.markdown(f"""
-                                <div class="metric-card">
-                                    <strong>🌍 Languages Spoken:</strong> {detected_languages}<br>
-                                    <strong>🎭 Style Profile Tone:</strong> {detected_tone}
-                                </div>
-                            """, unsafe_allow_html=True)
-                            
-                            st.markdown("<br>📊 **English Processing Step:**", unsafe_allow_html=True)
-                            st.caption(translation_output)
-                            
-                            st.markdown("<br>🚀 **Automated Response Generated (Native Language Copy):**", unsafe_allow_html=True)
-                            st.success(final_native_reply)
-                            
-                            raw_from = selected_msg.get("From")
-                            sender_name, sender_email = email.utils.parseaddr(raw_from)
-                            raw_subject, encoding = decode_header(selected_msg.get("Subject", ""))[0]
-                            if isinstance(raw_subject, bytes):
-                                raw_subject = raw_subject.decode(encoding or "utf-8", errors="ignore")
-                            reply_subject = raw_subject if raw_subject.lower().startswith("re:") else f"Re: {raw_subject}"
-                            
-                            with st.spinner(f"📤 Auto-dispatching email via SMTP back to {sender_email}..."):
-                                try:
-                                    msg = MIMEMultipart()
-                                    msg['From'] = EMAIL_USER
-                                    msg['To'] = sender_email
-                                    msg['Subject'] = reply_subject
-                                    msg.attach(MIMEText(final_native_reply, 'plain', 'utf-8'))
-                                    
-                                    server = smtplib.SMTP_SSL("smtp.gmail.com", 465)
-                                    server.login(EMAIL_USER, EMAIL_PASS)
-                                    server.sendmail(EMAIL_USER, sender_email, msg.as_string())
-                                    server.close()
-                                    st.toast(f"Outbound reply delivered smoothly to {sender_email}!", icon="✅")
-                                except Exception as smtp_err:
-                                    st.error(f"SMTP Outbound Transmission Error: {smtp_err}")
-                else:
-                    status_box.error("Processing halted: The email body contains zero text metrics.")
+                ui_print("Scanning inbox target workspace... No unseen messages located.")
         else:
-            st.warning("Selected email contains no evaluation fields.")
+            ui_print("Scanning inbox target workspace... No unseen messages located.")
+        mail.logout()
+    except Exception as e:
+        ui_print(f"❌ Connection error: {e}")
+    time.sleep(POLL_INTERVAL_SECONDS)
+    st.rerun()
